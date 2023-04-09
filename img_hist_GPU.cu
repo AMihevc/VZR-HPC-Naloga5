@@ -118,7 +118,7 @@ int main(int argc, char **argv)
         float milliseconds = 0;
         cudaEventElapsedTime(&milliseconds, start, stop);
         
-        printHistogram(h_hist_seq);
+        //printHistogram(h_hist_seq);
         printf("CPU time: %0.3f milliseconds \n", milliseconds);
         
     }
@@ -147,6 +147,9 @@ int main(int argc, char **argv)
         checkCudaErrors(cudaMemcpy(d_histGPU, h_hist, 3 * BINS* sizeof(unsigned int), cudaMemcpyHostToDevice));
         //printf("Allocated mem for the histogram on the GPU\n");
 
+        //time mesurement start
+        cudaEventRecord(start);
+        
         // allocate and copy the image to the GPU
         int size = width * height * cpp * sizeof(unsigned char);
         checkCudaErrors(cudaMalloc(&d_imageGPU, size));
@@ -159,18 +162,9 @@ int main(int argc, char **argv)
         // calculate the grid size so that there is enough blocks to cover the whole image (1 pixel per thread)
         dim3 gridSize((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
 
-        //time mesurement start
-        cudaEventRecord(start);
-
         // call the kernel
         //printf("Launching the kernel\n");
         histogramGPU<<<gridSize, blockSize>>>(d_imageGPU, d_histGPU, width, height, cpp);
-        
-        //time mesurement stop
-        cudaEventRecord(stop);
-
-        // Wait for the event to finish
-        cudaEventSynchronize(stop);
 
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) 
@@ -183,6 +177,12 @@ int main(int argc, char **argv)
         checkCudaErrors(cudaMemcpy(h_hist, d_histGPU, 3 * BINS* sizeof(unsigned int), cudaMemcpyDeviceToHost));
         //printf("Copied mem from the GPU to the CPU\n");
 
+        //time mesurement stop
+        cudaEventRecord(stop);
+
+        // Wait for the event to finish
+        cudaEventSynchronize(stop);
+
         //free the GPU memory
         cudaFree(d_histGPU);
         cudaFree(d_imageGPU);
@@ -190,20 +190,27 @@ int main(int argc, char **argv)
         // Display time mesurments
         float milliseconds = 0;
         cudaEventElapsedTime(&milliseconds, start, stop);
-        //printf("GPU time: %0.3f milliseconds \n", milliseconds);
+        printf("GPU time: %0.3f milliseconds \n", milliseconds);
 
         // Display the histogram 
-        printHistogram(h_hist); 
+        //printHistogram(h_hist); 
 
-        // Check if the histograms are the same   
-        if (h_hist_seq == h_hist)
+        // Check if the histograms are the same
+        int same = 0;  
+        for (int i = 0; i < 3 * BINS; i++)
         {
-            printf("The histograms are the same\n");
+            if (h_hist[i] != h_hist_seq[i])
+            {
+                printf("Histograms are not the same!\n");
+                same = 1;
+                break;
+            }
         }
-        else
+        if (same == 0)
         {
-            printf("The histograms are different\n");
+            printf("Histograms are the same!\n");
         }
+
     }
     else
     {
@@ -221,3 +228,8 @@ int main(int argc, char **argv)
 
     return 0;
 }
+/*
+CPU time: 70.341 milliseconds 
+GPU time: 40.059 milliseconds 
+Histograms are the same!
+*/
