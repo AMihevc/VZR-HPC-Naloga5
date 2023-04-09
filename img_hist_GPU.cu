@@ -13,10 +13,9 @@
 #include "stb_image_write.h"
 
 #define BINS 256
-#define BLOCK_SIZE 16 //TODO this probably needs to be changed to 256 or 512
+#define BLOCK_SIZE 32 //TODO this probably needs to be changed to 256 or 512
 
-unsigned int *h_hist;
-unsigned int *d_histGPU;
+
 
 void histogramCPU(unsigned char *imageIn,
                   unsigned int *hist,
@@ -49,7 +48,7 @@ void printHistogram(unsigned int *hist)
 }
 
 
-//TODO write a GPU kernel to compute the histogram on the GPU
+// a GPU kernel to compute the histogram on the GPU
 __global__ void histogramGPU(unsigned char *imageIn,
                              unsigned int *hist,
                              int width, int height, int cpp)
@@ -57,47 +56,17 @@ __global__ void histogramGPU(unsigned char *imageIn,
     // Each color channel is 1 byte long, there are 4 channels RED, BLUE, GREEN,  and ALPHA
     // The order is RED|GREEN|BLUE|ALPHA for each pixel, we ignore the ALPHA channel when computing the histograms
 
-    //TODO calculate global and local id ant use them to calculate the pixel index
-    int tid_global_i = blockDim.x * blockIdx.x + threadIdx.x;
-    int tid_global_j = blockDim.y * blockIdx.y + threadIdx.y;
+    // calculate global and local id and use them to calculate the pixel index
+    int tid_global_j = blockDim.x * blockIdx.x + threadIdx.x;
+    int tid_global_i = blockDim.y * blockIdx.y + threadIdx.y;
 
-    int tid_local_i = threadIdx.x;
-    int tid_local_j = threadIdx.y; 
-
-    //initialize shared memory of each chanel R G B for each block of threads 
-    __shared__ unsigned int local_histR[BINS];
-    __shared__ unsigned int local_histG[BINS];
-    __shared__ unsigned int local_histB[BINS];
-
-    //initialize the tables to zero 
-    local_histR[tid_local_i * blockDim.x + tid_local_j] = 0;
-    local_histG[tid_local_i * blockDim.x + tid_local_j] = 0;
-    local_histB[tid_local_i * blockDim.x + tid_local_j] = 0;
-
-    // wait for all threads in block to finish
-    __syncthreads();
-
-
-    //
-
-    //TODO check that threads dont check pixels "outside" the image
+    // check that threads dont check pixels "outside" the image
     if ( tid_global_i < height && tid_global_j < width) {
 
-        atomicInc(&local_histR[imageIn[(tid_local_i * width + tid_local_j) * cpp]],1);                  // RED
-        atomicInc(&local_histG[imageIn[(tid_local_i * width + tid_local_j) * cpp + 1] + BINS],1);       // GREEN
-        atomicInc(&local_histB[imageIn[(tid_local_i * width + tid_local_j) * cpp + 2] + 2 * BINS],1);   // BLUE
-
+        atomicInc(&hist[imageIn[(tid_global_i * width + tid_global_j) * cpp]], 1);  // RED
+        atomicInc(&hist[imageIn[(tid_global_i * width + tid_global_j) * cpp +1]+ BINS], 1);  // GREEN
+        atomicInc(&hist[imageIn[(tid_global_i * width + tid_global_j) * cpp+ 2]+ 2*BINS], 1);  // BLUE
     }
-
-
-    // wait for all threads in block to finish
-    __syncthreads();
-
-    //TODO use atomic operations to update the global histogram
-    atomicAdd(&hist[tid_local_i * blockDim.x + tid_local_j], local_histR[tid_local_i * blockDim.x + tid_local_j]);
-    atomicAdd(&hist[tid_local_i * blockDim.x + tid_local_j + BINS], local_histG[tid_local_i * blockDim.x + tid_local_j]);
-    atomicAdd(&hist[tid_local_i * blockDim.x + tid_local_j + 2 * BINS], local_histB[tid_local_i * blockDim.x + tid_local_j]);
-
 
 }
 
@@ -105,6 +74,7 @@ int main(int argc, char **argv)
 {
     char *image_file = argv[1];
 
+    // if image not provided exit
     if (argc > 1)
     {
         image_file = argv[1];
@@ -116,14 +86,21 @@ int main(int argc, char **argv)
         exit(1);
     }
 
-    // Initalize the histogram
-    h_hist = (unsigned int *)calloc(3 * BINS, sizeof(unsigned int));
-
+    // Initalize variables
+    unsigned int *h_hist;
+    unsigned int *h_hist_seq;
+    unsigned int *d_histGPU;
+    unsigned char *d_imageGPU;
     int width, height, cpp;
-    unsigned char *image_in = stbi_load(image_file, &width, &height, &cpp, 0); // Load the image
+
+    // load the image
+    unsigned char *image_in = stbi_load(image_file, &width, &height, &cpp, 0); 
+    
+    // allocate memory for the histogram on the CPU
+    h_hist_seq = (unsigned int *)calloc(3 * BINS, sizeof(unsigned int));
     
     //########## CPU ##########
-    /*
+    
     if (image_in)
     {
         // Compute and print the histogram
@@ -141,83 +118,101 @@ int main(int argc, char **argv)
         float milliseconds = 0;
         cudaEventElapsedTime(&milliseconds, start, stop);
 
-        printf("Time: %0.3f milliseconds \n", milliseconds);
+        printf("CPU time: %0.3f milliseconds \n", milliseconds);
         printHistogram(h_hist);
     }
     else
     {
         fprintf(stderr, "Error loading image %s!\n", image_file);
     }
-    */
+    
     
     
     //########## GPU ##########
 
-    if (image_in)
+    // Compute and print the histogram
+    if (image_in) // if image loaded
     {
-        // Compute and print the histogram
-
-        // Set the thread execution grid (1 block)
-        dim3 blockSize(BLOCK_SIZE);
-
-        //TODO calculate the grid size so that there is enough blocks to cover the whole image (1 pixel per thread)
-        dim3 gridSize((width + BLOCK_SIZE - 1) / BLOCK_SIZE, (height + BLOCK_SIZE - 1) / BLOCK_SIZE);
-
+        // initialize the timig variables
         cudaEvent_t start, stop;
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
-        cudaEventRecord(start);
 
+        // allocate memory for the histogram, calcualted on the GPU, on the host 
+        h_hist = (unsigned int *)calloc(3 * BINS, sizeof(unsigned int));
 
-        // allocate memory for the histogram on the GPU
-        d_histGPU = (unsigned int *)calloc(3 * BINS, sizeof(unsigned int));
-        // allocate memory for the image on the GPU
-        unsigned char *d_imageGPU;
-        d_imageGPU = (unsigned char *)calloc(width * height * cpp, sizeof(unsigned char));
-
-        // copy the histogram to the GPU
+        // allocate and copy the histogram to the GPU
         checkCudaErrors(cudaMalloc(&d_histGPU, sizeof(h_hist)));
         checkCudaErrors(cudaMemcpy(d_histGPU, h_hist, sizeof(h_hist), cudaMemcpyHostToDevice));
 
-        // copy the image to the GPU
+        // allocate and copy the image to the GPU
         checkCudaErrors(cudaMalloc(&d_imageGPU, sizeof(image_in)));
         checkCudaErrors(cudaMemcpy(d_imageGPU, image_in, sizeof(image_in), cudaMemcpyHostToDevice));
 
+        // Set the thread execution grid (1 block)
+        dim3 blockSize(BLOCK_SIZE, BLOCK_SIZE);
 
-        //TODO call the kernel
+        // calculate the grid size so that there is enough blocks to cover the whole image (1 pixel per thread)
+        dim3 gridSize((width + blockSize.x - 1) / blockSize.x, (height + blockSize.y - 1) / blockSize.y);
+
+        //time mesurement start
+        cudaEventRecord(start);
+
+        // call the kernel
         histogramGPU<<<gridSize, blockSize>>>(image_in, d_histGPU, width, height, cpp);
         
-
-
-        //TODO copy the histogram back to the CPU
-
-        //TODO print the histogram
-
-        //TODO free the memory on the GPU
-
-        //time mesurement
+        //time mesurement stop
         cudaEventRecord(stop);
 
         // Wait for the event to finish
         cudaEventSynchronize(stop);
 
+        //Error checking
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) 
+        {
+            printf("cudaGetDeviceCount error %d\n-> %s\n", err, cudaGetErrorString(err));
+            exit(EXIT_FAILURE);
+        }
+
+        // copy the histogram back to the CPU
+        checkCudaErrors(cudaMemcpy(h_hist, d_histGPU, sizeof(d_histGPU), cudaMemcpyDeviceToHost));
+
+        //free the GPU memory
+        cudaFree(d_histGPU);
+        cudaFree(d_imageGPU);
+
+        // Display time mesurments
         float milliseconds = 0;
         cudaEventElapsedTime(&milliseconds, start, stop);
+        printf("GPU time: %0.3f milliseconds \n", milliseconds);
 
-        printf("Time: %0.3f milliseconds \n", milliseconds);
-        printHistogram(h_hist); //TODO is this the correct histogram? to display
+        // Display the histogram 
+        printHistogram(h_hist); 
+
+        // Check if the histograms are the same   
+        if (h_hist_seq == h_hist)
+        {
+            printf("The histograms are the same\n");
+        }
+        else
+        {
+            printf("The histograms are different\n");
+        }
     }
     else
     {
         fprintf(stderr, "Error loading image %s!\n", image_file);
     }
 
-
-
     //########## CLEAN UP ##########
 
     // Free the image
     stbi_image_free(image_in);
+    
+    // Free the histograms
+    free(h_hist);
+    free(h_hist_seq);
 
     return 0;
 }
