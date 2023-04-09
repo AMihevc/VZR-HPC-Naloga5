@@ -49,8 +49,8 @@ void printHistogram(unsigned int *hist)
 
 
 // a GPU kernel to compute the histogram on the GPU
-__global__ void histogramGPU(unsigned char *imageIn,
-                             unsigned int *hist,
+__global__ void histogramGPU(unsigned char* imageIn,
+                             unsigned int* hist,
                              int width, int height, int cpp)
 {
     // Each color channel is 1 byte long, there are 4 channels RED, BLUE, GREEN,  and ALPHA
@@ -63,9 +63,9 @@ __global__ void histogramGPU(unsigned char *imageIn,
     // check that threads dont check pixels "outside" the image
     if ( tid_global_i < height && tid_global_j < width) {
 
-        atomicInc(&hist[imageIn[(tid_global_i * width + tid_global_j) * cpp]], 1);  // RED
-        atomicInc(&hist[imageIn[(tid_global_i * width + tid_global_j) * cpp +1]+ BINS], 1);  // GREEN
-        atomicInc(&hist[imageIn[(tid_global_i * width + tid_global_j) * cpp+ 2]+ 2*BINS], 1);  // BLUE
+        atomicAdd(&hist[imageIn[(tid_global_i * width + tid_global_j) * cpp]], 1);              // RED
+        atomicAdd(&hist[imageIn[(tid_global_i * width + tid_global_j) * cpp + 1]+ BINS], 1);     // GREEN
+        atomicAdd(&hist[imageIn[(tid_global_i * width + tid_global_j) * cpp + 2]+ 2*BINS], 1);   // BLUE
     }
 
 }
@@ -109,7 +109,7 @@ int main(int argc, char **argv)
         cudaEventCreate(&start);
         cudaEventCreate(&stop);
         cudaEventRecord(start);
-        histogramCPU(image_in, h_hist, width, height, cpp);
+        histogramCPU(image_in, h_hist_seq, width, height, cpp);
         cudaEventRecord(stop);
 
         // Wait for the event to finish
@@ -117,9 +117,10 @@ int main(int argc, char **argv)
 
         float milliseconds = 0;
         cudaEventElapsedTime(&milliseconds, start, stop);
-
+        
+        printHistogram(h_hist_seq);
         printf("CPU time: %0.3f milliseconds \n", milliseconds);
-        printHistogram(h_hist);
+        
     }
     else
     {
@@ -142,12 +143,15 @@ int main(int argc, char **argv)
         h_hist = (unsigned int *)calloc(3 * BINS, sizeof(unsigned int));
 
         // allocate and copy the histogram to the GPU
-        checkCudaErrors(cudaMalloc(&d_histGPU, sizeof(h_hist)));
-        checkCudaErrors(cudaMemcpy(d_histGPU, h_hist, sizeof(h_hist), cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMalloc(&d_histGPU, 3 * BINS* sizeof(unsigned int)));
+        checkCudaErrors(cudaMemcpy(d_histGPU, h_hist, 3 * BINS* sizeof(unsigned int), cudaMemcpyHostToDevice));
+        //printf("Allocated mem for the histogram on the GPU\n");
 
         // allocate and copy the image to the GPU
-        checkCudaErrors(cudaMalloc(&d_imageGPU, sizeof(image_in)));
-        checkCudaErrors(cudaMemcpy(d_imageGPU, image_in, sizeof(image_in), cudaMemcpyHostToDevice));
+        int size = width * height * cpp * sizeof(unsigned char);
+        checkCudaErrors(cudaMalloc(&d_imageGPU, size));
+        checkCudaErrors(cudaMemcpy(d_imageGPU, image_in, size, cudaMemcpyHostToDevice));
+        //printf("Allocated mem for the image on the GPU\n");
 
         // Set the thread execution grid (1 block)
         dim3 blockSize(BLOCK_SIZE, BLOCK_SIZE);
@@ -159,7 +163,8 @@ int main(int argc, char **argv)
         cudaEventRecord(start);
 
         // call the kernel
-        histogramGPU<<<gridSize, blockSize>>>(image_in, d_histGPU, width, height, cpp);
+        //printf("Launching the kernel\n");
+        histogramGPU<<<gridSize, blockSize>>>(d_imageGPU, d_histGPU, width, height, cpp);
         
         //time mesurement stop
         cudaEventRecord(stop);
@@ -167,7 +172,6 @@ int main(int argc, char **argv)
         // Wait for the event to finish
         cudaEventSynchronize(stop);
 
-        //Error checking
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) 
         {
@@ -176,7 +180,8 @@ int main(int argc, char **argv)
         }
 
         // copy the histogram back to the CPU
-        checkCudaErrors(cudaMemcpy(h_hist, d_histGPU, sizeof(d_histGPU), cudaMemcpyDeviceToHost));
+        checkCudaErrors(cudaMemcpy(h_hist, d_histGPU, 3 * BINS* sizeof(unsigned int), cudaMemcpyDeviceToHost));
+        //printf("Copied mem from the GPU to the CPU\n");
 
         //free the GPU memory
         cudaFree(d_histGPU);
@@ -185,7 +190,7 @@ int main(int argc, char **argv)
         // Display time mesurments
         float milliseconds = 0;
         cudaEventElapsedTime(&milliseconds, start, stop);
-        printf("GPU time: %0.3f milliseconds \n", milliseconds);
+        //printf("GPU time: %0.3f milliseconds \n", milliseconds);
 
         // Display the histogram 
         printHistogram(h_hist); 
